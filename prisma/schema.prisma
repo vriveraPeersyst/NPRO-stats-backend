@@ -1,0 +1,115 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Current Metrics Storage
+// Key-value store for the latest computed metrics
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model MetricCurrent {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("metric_current")
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Metric Snapshots for Delta Calculations
+// Stores historical numeric values for computing 24h changes
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model MetricSnapshot {
+  id           String   @id @default(uuid())
+  key          String
+  ts           DateTime @default(now())
+  valueNumeric Decimal  @db.Decimal(40, 10)
+
+  @@index([key, ts])
+  @@map("metric_snapshot")
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Premium Indexer State
+// Stores cursor for resumable pagination
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model PremiumState {
+  id        Int      @id @default(1)
+  cursor    String?
+  updatedAt DateTime @updatedAt
+
+  @@map("premium_state")
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Premium Events
+// Stores all processed premium-related transactions for idempotency
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+enum DeltaType {
+  SUB_PREMIUM        // +250 NPRO - new premium subscription
+  SUB_AMBASSADOR     // +75 NPRO - new ambassador subscription
+  UPGRADE            // +175 NPRO - upgrade ambassador to premium
+  DOWNGRADE_PREMIUM  // -250 NPRO - downgrade premium to basic
+  DOWNGRADE_AMBASSADOR // -75 NPRO - downgrade ambassador to basic
+  OTHER              // Unknown delta amount
+}
+
+model PremiumEvent {
+  eventIndex     String   @id
+  accountId      String
+  deltaType      DeltaType
+  deltaAmountRaw String   // Raw bigint as string (24 decimals)
+  blockTimestamp DateTime
+  txHash         String
+
+  @@index([blockTimestamp])
+  @@index([accountId])
+  @@index([deltaType])
+  @@map("premium_event")
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Premium Users
+// Current tier status for each user account
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+enum UserTier {
+  BASIC
+  AMBASSADOR
+  PREMIUM
+}
+
+model PremiumUser {
+  accountId      String   @id
+  tier           UserTier @default(BASIC)
+  lastEventIndex String
+  updatedAt      DateTime @updatedAt
+
+  @@index([tier])
+  @@map("premium_user")
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Sync State
+// Tracks when each sync type was last run successfully
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+model SyncState {
+  type      String   @id // 'fast' | 'slow' | 'premium'
+  lastRunAt DateTime @default(now())
+  status    String   @default("pending") // 'pending' | 'success' | 'error'
+  error     String?
+
+  @@map("sync_state")
+}

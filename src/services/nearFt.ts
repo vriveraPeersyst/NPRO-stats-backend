@@ -1,0 +1,202 @@
+import { getNearRpcManager } from './nearRpcManager.js';
+import { CONSTANTS } from '../config/env.js';
+import { formatTokenAmount, calculateUsdValue } from '../utils/format.js';
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// NEAR FT Balance Service
+// Fetch FT balances and validator stats via NEAR RPC
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+interface ViewFunctionResult {
+  result: number[];
+  logs: string[];
+  block_height: number;
+  block_hash: string;
+}
+
+/**
+ * Decode view function result from bytes to string
+ */
+function decodeResult(result: number[]): string {
+  return String.fromCharCode(...result);
+}
+
+/**
+ * Call a view function on a NEAR contract
+ */
+async function viewFunction(
+  contractId: string,
+  methodName: string,
+  args: Record<string, unknown> = {}
+): Promise<string> {
+  const rpcManager = getNearRpcManager();
+
+  return rpcManager.makeRequest(async (provider) => {
+    const argsBase64 = Buffer.from(JSON.stringify(args)).toString('base64');
+
+    const rawResult = await provider.query({
+      request_type: 'call_function',
+      finality: 'final',
+      account_id: contractId,
+      method_name: methodName,
+      args_base64: argsBase64,
+    });
+
+    const result = rawResult as unknown as ViewFunctionResult;
+    return decodeResult(result.result);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FT Balance Functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface FtBalanceResult {
+  raw: string;
+  formatted: string;
+  number: number;
+  usdValue: number;
+}
+
+/**
+ * Get FT balance for an account
+ */
+export async function getFtBalance(
+  tokenContract: string,
+  accountId: string,
+  priceUsd: number = 0
+): Promise<FtBalanceResult> {
+  try {
+    const rawResult = await viewFunction(tokenContract, 'ft_balance_of', {
+      account_id: accountId,
+    });
+
+    // Result is a quoted string like "12345..."
+    const raw = rawResult.replace(/"/g, '');
+
+    return {
+      raw,
+      formatted: formatTokenAmount(raw),
+      number: parseFloat(formatTokenAmount(raw)),
+      usdValue: calculateUsdValue(raw, priceUsd),
+    };
+  } catch (error) {
+    console.warn(`⚠️ Failed to get FT balance for ${accountId}: ${error}`);
+    return {
+      raw: '0',
+      formatted: '0',
+      number: 0,
+      usdValue: 0,
+    };
+  }
+}
+
+/**
+ * Get NPRO balances for all tracked accounts
+ */
+export async function getTrackedAccountBalances(
+  priceUsd: number
+): Promise<Record<string, FtBalanceResult>> {
+  const results: Record<string, FtBalanceResult> = {};
+
+  for (const [name, accountId] of Object.entries(CONSTANTS.TRACKED_ACCOUNTS)) {
+    results[name] = await getFtBalance(CONSTANTS.NPRO_CONTRACT, accountId, priceUsd);
+  }
+
+  return results;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Validator Stats Functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ValidatorStats {
+  stakedBalance: {
+    raw: string;
+    formatted: string;
+    number: number;
+  };
+  unstakedBalance: {
+    raw: string;
+    formatted: string;
+    number: number;
+  };
+  totalBalance: {
+    raw: string;
+    formatted: string;
+    number: number;
+  };
+  rpcUrlUsed: string;
+}
+
+/**
+ * Get validator staking pool stats
+ * Uses staking pool contract methods
+ */
+export async function getValidatorStats(): Promise<ValidatorStats> {
+  const rpcManager = getNearRpcManager();
+
+  // Staking pool methods vary by implementation
+  // Common methods for NEAR staking pools:
+  // - get_total_staked_balance
+  // - get_account_staked_balance
+  // - get_account_unstaked_balance
+
+  try {
+    // Try to get total staked balance
+    const stakedResult = await viewFunction(
+      CONSTANTS.VALIDATOR_POOL,
+      'get_total_staked_balance',
+      {}
+    );
+    const stakedRaw = stakedResult.replace(/"/g, '');
+
+    // Try to get pending unstake balance
+    // Note: This method may not exist on all pools
+    let unstakedRaw = '0';
+    try {
+      // Some pools have this method
+      const unstakedResult = await viewFunction(
+        CONSTANTS.VALIDATOR_POOL,
+        'get_account_total_balance',
+        {}
+      );
+      const totalRaw = unstakedResult.replace(/"/g, '');
+      // Calculate unstaked as total - staked
+      const total = BigInt(totalRaw);
+      const staked = BigInt(stakedRaw);
+      if (total > staked) {
+        unstakedRaw = (total - staked).toString();
+      }
+    } catch {
+      // Method doesn't exist, that's okay
+      console.log('ℹ️ Unstaked balance method not available');
+    }
+
+    const stakedFormatted = formatTokenAmount(stakedRaw);
+    const unstakedFormatted = formatTokenAmount(unstakedRaw);
+    const totalRaw = (BigInt(stakedRaw) + BigInt(unstakedRaw)).toString();
+
+    return {
+      stakedBalance: {
+        raw: stakedRaw,
+        formatted: stakedFormatted,
+        number: parseFloat(stakedFormatted),
+      },
+      unstakedBalance: {
+        raw: unstakedRaw,
+        formatted: unstakedFormatted,
+        number: parseFloat(unstakedFormatted),
+      },
+      totalBalance: {
+        raw: totalRaw,
+        formatted: formatTokenAmount(totalRaw),
+        number: parseFloat(formatTokenAmount(totalRaw)),
+      },
+      rpcUrlUsed: rpcManager.getCurrentUrl(),
+    };
+  } catch (error) {
+    console.error('❌ Failed to get validator stats:', error);
+    throw error;
+  }
+}

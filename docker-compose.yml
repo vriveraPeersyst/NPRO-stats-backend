@@ -1,0 +1,41 @@
+# Docker Compose for local development
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: npro-stats-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: npro_stats
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: npro-stats-api
+    ports:
+      - "8787:8787"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/npro_stats
+      - PORT=8787
+      - NODE_ENV=development
+      - LOG_LEVEL=debug
+      - SYNC_SECRET=local-dev-secret-minimum-16-chars
+      - NEAR_RPC_URLS=https://near.lava.build,https://rpc.mainnet.near.org
+      - NEARBLOCKS_API_KEYS=your-api-key-here
+      - NEARBLOCKS_API_HEADER=Authorization
+      - NEARBLOCKS_API_PREFIX=Bearer 
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

@@ -1,0 +1,46 @@
+{
+  "name": "npro-stats-backend",
+  "version": "1.0.0",
+  "description": "Production-ready backend for NPRO Stats dashboard - NEAR Mobile token analytics",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsup && npm run prisma:generate",
+    "start": "node dist/server.js",
+    "sync:fast": "node dist/bin/run-fast-sync.js",
+    "sync:slow": "node dist/bin/run-slow-sync.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "fastify": "^4.28.1",
+    "near-api-js": "^7.0.4",
+    "pino": "^9.4.0",
+    "pino-pretty": "^11.2.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "prisma": "^5.22.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "keywords": [
+    "near",
+    "npro",
+    "blockchain",
+    "analytics",
+    "dashboard"
+  ],
+  "license": "MIT"
+}
