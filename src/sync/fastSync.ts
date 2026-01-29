@@ -1,6 +1,6 @@
 import { prisma } from '../db/prisma.js';
 import { CONSTANTS } from '../config/env.js';
-import { fetchTokenPrices } from '../services/coingecko.js';
+import { fetchNearPrice } from '../services/nearMobileApi.js';
 import { fetchLiquidityData } from '../services/dexscreener.js';
 import { getValidatorStats, getTrackedAccountBalances, getFtBalance } from '../services/nearFt.js';
 import { writeSnapshot } from '../utils/snapshots.js';
@@ -9,8 +9,8 @@ import { getNearRpcManager } from '../services/nearRpcManager.js';
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Fast Sync
 // Runs every 5 minutes
-// - CoinGecko token prices
-// - DexScreener liquidity/volume/txns
+// - NEAR Mobile API for NEAR price
+// - DexScreener liquidity/volume/txns (includes NPRO price)
 // - NEAR RPC: validator stats + account balances
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -39,53 +39,15 @@ export async function runFastSync(): Promise<FastSyncResult> {
   console.log('🚀 Starting fast sync...');
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 1. Fetch Token Prices from CoinGecko
+  // 1. Fetch Liquidity Data from DexScreener (includes NPRO price)
   // ─────────────────────────────────────────────────────────────────────────────
   let nproPriceUsd = 0;
+  let nearPriceUsd = 0;
 
-  try {
-    console.log('📊 Fetching token prices from CoinGecko...');
-    const priceData = await fetchTokenPrices();
-    nproPriceUsd = priceData.npro.usd;
-
-    await prisma.metricCurrent.upsert({
-      where: { key: CONSTANTS.METRIC_KEYS.TOKEN_PRICES },
-      update: {
-        value: priceData as any,
-      },
-      create: {
-        key: CONSTANTS.METRIC_KEYS.TOKEN_PRICES,
-        value: priceData as any,
-      },
-    });
-
-    metrics.tokenPrices = true;
-    console.log(`✅ Token prices updated. NPRO: $${nproPriceUsd}`);
-  } catch (error) {
-    const message = `Token prices error: ${error instanceof Error ? error.message : String(error)}`;
-    console.error(`❌ ${message}`);
-    errors.push(message);
-
-    // Try to get existing price for other operations
-    try {
-      const existing = await prisma.metricCurrent.findUnique({
-        where: { key: CONSTANTS.METRIC_KEYS.TOKEN_PRICES },
-      });
-      if (existing?.value && typeof existing.value === 'object') {
-        const value = existing.value as { npro?: { usd?: number } };
-        nproPriceUsd = value.npro?.usd || 0;
-      }
-    } catch {
-      // Ignore
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // 2. Fetch Liquidity Data from DexScreener
-  // ─────────────────────────────────────────────────────────────────────────────
   try {
     console.log('📊 Fetching liquidity data from DexScreener...');
     const liquidityData = await fetchLiquidityData();
+    nproPriceUsd = liquidityData.rhea.priceUsd;
 
     // Add intents balance
     const intentsBalance = await getFtBalance(
@@ -115,9 +77,83 @@ export async function runFastSync(): Promise<FastSyncResult> {
     await writeSnapshot(CONSTANTS.SNAPSHOT_KEYS.RHEA_VOLUME_H24, liquidityData.rhea.volume24h);
 
     metrics.liquidity = true;
-    console.log(`✅ Liquidity data updated. TVL: $${liquidityData.rhea.tvlUsd.toFixed(2)}`);
+    console.log(`✅ Liquidity data updated. NPRO: $${nproPriceUsd}, TVL: $${liquidityData.rhea.tvlUsd.toFixed(2)}`);
   } catch (error) {
     const message = `Liquidity error: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(`❌ ${message}`);
+    errors.push(message);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 2. Fetch NEAR Price from NEAR Mobile API
+  // ─────────────────────────────────────────────────────────────────────────────
+  try {
+    console.log('📊 Fetching NEAR price from NEAR Mobile API...');
+    const nearPriceData = await fetchNearPrice();
+    nearPriceUsd = nearPriceData.usd;
+
+    // Build complete token prices using DexScreener for NPRO, NEAR Mobile API for NEAR
+    const nproInNear = nearPriceUsd > 0 ? nproPriceUsd / nearPriceUsd : 0;
+    
+    // Get NPRO change24h from liquidity data (priceChange24hPct)
+    const liquidityMetric = await prisma.metricCurrent.findUnique({
+      where: { key: CONSTANTS.METRIC_KEYS.LIQUIDITY_STATS },
+    });
+    
+    let nproChange24h = 0;
+    let nproMarketCap = 0;
+    let nproFdv = 0;
+    
+    if (liquidityMetric?.value && typeof liquidityMetric.value === 'object') {
+      const liquidityValue = liquidityMetric.value as any;
+      nproChange24h = liquidityValue.rhea?.priceChange24hPct || 0;
+      nproMarketCap = liquidityValue.rhea?.marketCap || 0;
+      nproFdv = liquidityValue.rhea?.fdv || 0;
+    }
+
+    // Calculate NPRO/NEAR 24h change
+    const nproYesterday = nproPriceUsd / (1 + nproChange24h / 100);
+    const nearYesterday = nearPriceUsd / (1 + nearPriceData.change24h / 100);
+    const nproInNearYesterday = nearYesterday > 0 ? nproYesterday / nearYesterday : 0;
+    const nproInNearChange24h = nproInNearYesterday > 0 
+      ? ((nproInNear - nproInNearYesterday) / nproInNearYesterday) * 100 
+      : 0;
+
+    const combinedPriceData = {
+      npro: {
+        usd: nproPriceUsd,
+        change24h: nproChange24h,
+        change7d: 0, // Not available from DexScreener
+        change30d: 0, // Not available from DexScreener
+        marketCap: nproMarketCap,
+        fdv: nproFdv,
+        circulatingSupply: nproMarketCap > 0 && nproPriceUsd > 0 ? nproMarketCap / nproPriceUsd : 0,
+      },
+      near: {
+        usd: nearPriceUsd,
+        change24h: nearPriceData.change24h,
+        change7d: 0, // Not available from NEAR Mobile API
+        change30d: 0, // Not available from NEAR Mobile API
+      },
+      nproInNear,
+      nproInNearChange24h,
+    };
+
+    await prisma.metricCurrent.upsert({
+      where: { key: CONSTANTS.METRIC_KEYS.TOKEN_PRICES },
+      update: {
+        value: combinedPriceData as any,
+      },
+      create: {
+        key: CONSTANTS.METRIC_KEYS.TOKEN_PRICES,
+        value: combinedPriceData as any,
+      },
+    });
+
+    metrics.tokenPrices = true;
+    console.log(`✅ Token prices updated. NPRO: $${nproPriceUsd}, NEAR: $${nearPriceUsd}`);
+  } catch (error) {
+    const message = `NEAR price error: ${error instanceof Error ? error.message : String(error)}`;
     console.error(`❌ ${message}`);
     errors.push(message);
   }

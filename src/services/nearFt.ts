@@ -151,27 +151,9 @@ export async function getValidatorStats(): Promise<ValidatorStats> {
     );
     const stakedRaw = stakedResult.replace(/"/g, '');
 
-    // Try to get pending unstake balance
-    // Note: This method may not exist on all pools
-    let unstakedRaw = '0';
-    try {
-      // Some pools have this method
-      const unstakedResult = await viewFunction(
-        CONSTANTS.VALIDATOR_POOL,
-        'get_account_total_balance',
-        {}
-      );
-      const totalRaw = unstakedResult.replace(/"/g, '');
-      // Calculate unstaked as total - staked
-      const total = BigInt(totalRaw);
-      const staked = BigInt(stakedRaw);
-      if (total > staked) {
-        unstakedRaw = (total - staked).toString();
-      }
-    } catch {
-      // Method doesn't exist, that's okay
-      console.log('ℹ️ Unstaked balance method not available');
-    }
+    // For validator pools, we don't track unstaked balance
+    // (it requires individual account queries which we don't have)
+    const unstakedRaw = '0';
 
     const stakedFormatted = formatTokenAmount(stakedRaw);
     const unstakedFormatted = formatTokenAmount(unstakedRaw);

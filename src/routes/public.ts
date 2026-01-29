@@ -183,6 +183,57 @@ export async function registerPublicRoutes(app: FastifyInstance): Promise<void> 
       });
     }
   });
+
+  /**
+   * Get lists of premium and ambassador user addresses
+   */
+  app.get('/v1/npro/users', async (_request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      // Get all users with their tiers
+      const users = await prisma.premiumUser.findMany({
+        where: {
+          tier: {
+            in: ['PREMIUM', 'AMBASSADOR'],
+          },
+        },
+        select: {
+          accountId: true,
+          tier: true,
+          updatedAt: true,
+        },
+        orderBy: {
+          updatedAt: 'desc',
+        },
+      });
+
+      const premiumAddresses = users
+        .filter((u) => u.tier === 'PREMIUM')
+        .map((u) => u.accountId);
+
+      const ambassadorAddresses = users
+        .filter((u) => u.tier === 'AMBASSADOR')
+        .map((u) => u.accountId);
+
+      return reply.send({
+        premium: {
+          count: premiumAddresses.length,
+          addresses: premiumAddresses,
+        },
+        ambassador: {
+          count: ambassadorAddresses.length,
+          addresses: ambassadorAddresses,
+        },
+        total: users.length,
+        lastUpdated: users.length > 0 ? users[0].updatedAt.toISOString() : null,
+      });
+    } catch (error) {
+      app.log.error({ error }, 'Failed to fetch user lists');
+      return reply.status(500).send({
+        error: 'Failed to fetch user lists',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    }
+  });
 }
 
 function buildValidatorResponse(

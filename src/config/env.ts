@@ -28,10 +28,6 @@ const envSchema = z.object({
   NEARBLOCKS_MAX_RETRIES: z.string().default('3').transform(Number),
   NEARBLOCKS_MAX_PAGES_PER_RUN: z.string().default('20').transform(Number),
 
-  // CoinGecko
-  COINGECKO_BASE: z.string().url().default('https://api.coingecko.com/api/v3'),
-  COINGECKO_API_KEY: z.string().optional(),
-
   // DexScreener
   DEXSCREENER_BASE: z.string().url().default('https://api.dexscreener.com'),
 });
@@ -72,7 +68,6 @@ export function validateEnvAtStartup(): Env {
   console.log(`   PORT: ${env.PORT}`);
   console.log(`   NEAR RPC endpoints: ${env.NEAR_RPC_URLS.length}`);
   console.log(`   NearBlocks API keys: ${env.NEARBLOCKS_API_KEYS.length}`);
-  console.log(`   CoinGecko API key: ${env.COINGECKO_API_KEY ? 'configured' : 'not configured (using free tier)'}`);
 
   return env;
 }
@@ -86,8 +81,6 @@ export const CONSTANTS = {
   NPRO_CONTRACT: 'npro.nearmobile.near',
   NPRO_DECIMALS: 24,
   NPRO_TOTAL_SUPPLY: 10_000_000,
-  NPRO_COINGECKO_ID: 'npro',
-  NEAR_COINGECKO_ID: 'near',
 
   // Validator
   VALIDATOR_POOL: 'npro.poolv1.near',
