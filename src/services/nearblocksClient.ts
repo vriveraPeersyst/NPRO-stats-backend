@@ -272,6 +272,40 @@ class NearBlocksClient {
   }
 
   /**
+   * Get token holders list
+   */
+  async getHolders(
+    contract: string,
+    page?: number,
+    perPage?: number
+  ): Promise<{
+    holders: Array<{
+      account: string;
+      amount: string;
+    }>;
+  }> {
+    interface HoldersResponse {
+      holders: Array<{
+        account: string;
+        amount: string;
+      }>;
+    }
+
+    const params: Record<string, string | number> = {};
+    if (page) params.page = page;
+    if (perPage) params.per_page = perPage;
+
+    const data = await this.request<HoldersResponse>(
+      `/v1/fts/${contract}/holders`,
+      params
+    );
+
+    return {
+      holders: data.holders || [],
+    };
+  }
+
+  /**
    * Get FT transactions for an account with pagination
    */
   async getAccountFtTxns(

@@ -33,16 +33,19 @@ interface SummaryResponse {
     nproInNearChange24h: number;
   } | null;
   validator: {
+    /** Actively staked NEAR earning rewards */
     staked: {
       raw: string;
       formatted: string;
       number: number;
     };
+    /** Unstaked NEAR (in cooldown or ready to withdraw - cannot differentiate at pool level) */
     unstaked: {
       raw: string;
       formatted: string;
       number: number;
     };
+    /** Total NEAR in validator (staked + unstaked) */
     total: {
       raw: string;
       formatted: string;
@@ -80,6 +83,23 @@ interface SummaryResponse {
       totalTxns24h: number;
       baseNpro: number;
       quoteNear: number;
+      /** Pool composition with base/quote token details */
+      pool: {
+        base: {
+          symbol: string;
+          address: string;
+          amount: number;
+          usdValue: number;
+          pct: number;
+        };
+        quote: {
+          symbol: string;
+          address: string;
+          amount: number;
+          usdValue: number;
+          pct: number;
+        };
+      };
       priceUsd: number;
       priceNative: number;
       priceChange24hPct: number;
@@ -98,15 +118,34 @@ interface SummaryResponse {
     premiumUsersChange24h: number;
     ambassadorUsers: number;
     ambassadorUsersChange24h: number;
+    premiumSubscriptions24h: number;
+    ambassadorSubscriptions24h: number;
     upgrades24h: number;
     unsubscribes24h: number;
     paidUsers: number;
+    totalTransactions: number;
     locked: {
       premium: number;
       ambassador: number;
       total: number;
     };
+    /** Locked amounts in USD */
+    lockedUsdValue: {
+      premium: number;
+      ambassador: number;
+      total: number;
+    };
   } | null;
+  richList: Array<{
+    rank: number;
+    account: string;
+    balance: {
+      raw: string;
+      formatted: string;
+      number: number;
+      usdValue: number;
+    };
+  }> | null;
 }
 
 export async function registerPublicRoutes(app: FastifyInstance): Promise<void> {
@@ -151,6 +190,10 @@ export async function registerPublicRoutes(app: FastifyInstance): Promise<void> 
       const tvlDelta = await getSnapshotWithDelta(CONSTANTS.SNAPSHOT_KEYS.RHEA_TVL_USD);
       const volumeDelta = await getSnapshotWithDelta(CONSTANTS.SNAPSHOT_KEYS.RHEA_VOLUME_H24);
 
+      // Get NPRO price for USD calculations
+      const tokenPrices = metricsMap.get(CONSTANTS.METRIC_KEYS.TOKEN_PRICES) as SummaryResponse['token'] | undefined;
+      const nproPriceUsd = tokenPrices?.npro?.usd || 0;
+
       // Build response
       const response: SummaryResponse = {
         asOf: {
@@ -158,7 +201,7 @@ export async function registerPublicRoutes(app: FastifyInstance): Promise<void> 
           slow: (syncStateMap.get('slow') as any)?.lastRunAt?.toISOString() || null,
           premium: (syncStateMap.get('premium') as any)?.lastRunAt?.toISOString() || null,
         },
-        token: (metricsMap.get(CONSTANTS.METRIC_KEYS.TOKEN_PRICES) as SummaryResponse['token']) || null,
+        token: tokenPrices || null,
         validator: buildValidatorResponse(metricsMap.get(CONSTANTS.METRIC_KEYS.VALIDATOR_STATS)),
         nearblocks:
           (metricsMap.get(CONSTANTS.METRIC_KEYS.NEARBLOCKS_STATS) as SummaryResponse['nearblocks']) ||
@@ -171,7 +214,8 @@ export async function registerPublicRoutes(app: FastifyInstance): Promise<void> 
           tvlDelta.delta24h,
           volumeDelta.delta24h
         ),
-        premium: buildPremiumResponse(metricsMap.get(CONSTANTS.METRIC_KEYS.PREMIUM_STATS)),
+        premium: buildPremiumResponse(metricsMap.get(CONSTANTS.METRIC_KEYS.PREMIUM_STATS), nproPriceUsd),
+        richList: (metricsMap.get(CONSTANTS.METRIC_KEYS.RICH_LIST) as SummaryResponse['richList']) || null,
       };
 
       return reply.send(response);
@@ -279,19 +323,46 @@ function buildLiquidityResponse(
 
   if (!rhea) return null;
 
+  const tvlUsd = Number(rhea.tvlUsd || 0);
+  const baseNpro = Number(rhea.baseNpro || 0);
+  const quoteNear = Number(rhea.quoteNear || 0);
+  const priceUsd = Number(rhea.priceUsd || 0);
+  const priceNative = Number(rhea.priceNative || 0);
+
+  // Calculate USD values for pool composition
+  const baseUsdValue = baseNpro * priceUsd;
+  const quoteUsdValue = priceNative > 0 ? quoteNear * (priceUsd / priceNative) : 0;
+  const totalPoolUsd = baseUsdValue + quoteUsdValue;
+
   return {
     rhea: {
-      tvlUsd: Number(rhea.tvlUsd || 0),
+      tvlUsd,
       delta24h: tvlDelta24h,
       volume24h: Number(rhea.volume24h || 0),
       deltaVolume24h: volumeDelta24h,
       buys24h: Number(rhea.buys24h || 0),
       sells24h: Number(rhea.sells24h || 0),
       totalTxns24h: Number(rhea.totalTxns24h || 0),
-      baseNpro: Number(rhea.baseNpro || 0),
-      quoteNear: Number(rhea.quoteNear || 0),
-      priceUsd: Number(rhea.priceUsd || 0),
-      priceNative: Number(rhea.priceNative || 0),
+      baseNpro,
+      quoteNear,
+      pool: {
+        base: {
+          symbol: 'NPRO',
+          address: 'npro.nearmobile.near',
+          amount: baseNpro,
+          usdValue: baseUsdValue,
+          pct: totalPoolUsd > 0 ? (baseUsdValue / totalPoolUsd) * 100 : 50,
+        },
+        quote: {
+          symbol: 'NEAR',
+          address: 'wrap.near',
+          amount: quoteNear,
+          usdValue: quoteUsdValue,
+          pct: totalPoolUsd > 0 ? (quoteUsdValue / totalPoolUsd) * 100 : 50,
+        },
+      },
+      priceUsd,
+      priceNative,
       priceChange24hPct: Number(rhea.priceChange24hPct || 0),
       pairUrl: String(rhea.pairUrl || ''),
       marketCap: Number(rhea.marketCap || 0),
@@ -307,24 +378,39 @@ function buildLiquidityResponse(
   };
 }
 
-function buildPremiumResponse(data: unknown): SummaryResponse['premium'] | null {
+function buildPremiumResponse(
+  data: unknown,
+  nproPriceUsd: number = 0
+): SummaryResponse['premium'] | null {
   if (!data || typeof data !== 'object') return null;
 
   const d = data as Record<string, unknown>;
   const locked = d.locked as Record<string, unknown> | undefined;
+
+  const lockedPremium = Number(locked?.premium || 0);
+  const lockedAmbassador = Number(locked?.ambassador || 0);
+  const lockedTotal = Number(locked?.total || 0);
 
   return {
     premiumUsers: Number(d.premiumUsers || 0),
     premiumUsersChange24h: Number(d.premiumUsersChange24h || 0),
     ambassadorUsers: Number(d.ambassadorUsers || 0),
     ambassadorUsersChange24h: Number(d.ambassadorUsersChange24h || 0),
+    premiumSubscriptions24h: Number(d.premiumSubscriptions24h || 0),
+    ambassadorSubscriptions24h: Number(d.ambassadorSubscriptions24h || 0),
     upgrades24h: Number(d.upgrades24h || 0),
     unsubscribes24h: Number(d.unsubscribes24h || 0),
     paidUsers: Number(d.paidUsers || 0),
+    totalTransactions: Number(d.totalTransactions || 0),
     locked: {
-      premium: Number(locked?.premium || 0),
-      ambassador: Number(locked?.ambassador || 0),
-      total: Number(locked?.total || 0),
+      premium: lockedPremium,
+      ambassador: lockedAmbassador,
+      total: lockedTotal,
+    },
+    lockedUsdValue: {
+      premium: lockedPremium * nproPriceUsd,
+      ambassador: lockedAmbassador * nproPriceUsd,
+      total: lockedTotal * nproPriceUsd,
     },
   };
 }

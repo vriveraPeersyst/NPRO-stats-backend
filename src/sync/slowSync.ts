@@ -3,6 +3,7 @@ import { CONSTANTS } from '../config/env.js';
 import { getNearBlocksClient } from '../services/nearblocksClient.js';
 import { writeSnapshot, getDelta24h, cleanupOldSnapshots } from '../utils/snapshots.js';
 import { runPremiumIndexer, getPremiumStats, snapshotPremiumStats } from '../indexers/premiumIndexer.js';
+import { formatTokenAmount, calculateUsdValue } from '../utils/format.js';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Slow Sync
@@ -108,7 +109,74 @@ export async function runSlowSync(): Promise<SlowSyncResult> {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 2. Run Premium Indexer
+  // 2. Fetch Rich List (Top Holders)
+  // ─────────────────────────────────────────────────────────────────────────────
+  try {
+    console.log('📊 Fetching rich list...');
+    const client = getNearBlocksClient();
+
+    // Get top holders (fetch enough to filter out excluded accounts and get top 10)
+    const holdersResponse = await client.getHolders(CONSTANTS.NPRO_CONTRACT, 1, 50);
+
+    // Filter out excluded accounts
+    const excludedAccounts = CONSTANTS.EXCLUDED_FROM_RICHLIST as readonly string[];
+    const filteredHolders = holdersResponse.holders.filter(
+      (holder) => !excludedAccounts.includes(holder.account)
+    );
+
+    // Get top 10
+    const top10 = filteredHolders.slice(0, 10);
+
+    // Get current NPRO price for USD value
+    const priceMetric = await prisma.metricCurrent.findUnique({
+      where: { key: CONSTANTS.METRIC_KEYS.TOKEN_PRICES },
+    });
+
+    let nproPriceUsd = 0;
+    if (priceMetric?.value && typeof priceMetric.value === 'object') {
+      const priceValue = priceMetric.value as any;
+      nproPriceUsd = priceValue.npro?.usd || 0;
+    }
+
+    // Format rich list with USD values
+    const richList = top10.map((holder, index) => {
+      const raw = holder.amount;
+      const formatted = parseFloat(formatTokenAmount(raw));
+      const usdValue = calculateUsdValue(raw, nproPriceUsd);
+
+      return {
+        rank: index + 1,
+        account: holder.account,
+        balance: {
+          raw,
+          formatted: formatTokenAmount(raw),
+          number: formatted,
+          usdValue,
+        },
+      };
+    });
+
+    // Store rich list
+    await prisma.metricCurrent.upsert({
+      where: { key: CONSTANTS.METRIC_KEYS.RICH_LIST },
+      update: {
+        value: richList as any,
+      },
+      create: {
+        key: CONSTANTS.METRIC_KEYS.RICH_LIST,
+        value: richList as any,
+      },
+    });
+
+    console.log(`✅ Rich list updated with ${richList.length} holders`);
+  } catch (error) {
+    const message = `Rich list error: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(`❌ ${message}`);
+    errors.push(message);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // 3. Run Premium Indexer
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     console.log('📊 Running premium indexer...');
@@ -137,7 +205,7 @@ export async function runSlowSync(): Promise<SlowSyncResult> {
 
     metrics.premium = true;
     console.log(
-      `✅ Premium indexer completed. Pages: ${result.pagesProcessed}, Events: ${result.eventsProcessed}`
+      `✅ Premium indexer completed. Pages: ${result.pagesProcessed}, Events: ${result.eventsProcessed}, Users: ${result.usersRebuilt} (${result.tierCounts.premium} premium, ${result.tierCounts.ambassador} ambassador)`
     );
     console.log(
       `   Premium users: ${premiumStats.premiumUsers}, Ambassador users: ${premiumStats.ambassadorUsers}`
@@ -149,7 +217,7 @@ export async function runSlowSync(): Promise<SlowSyncResult> {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 3. Cleanup Old Snapshots
+  // 4. Cleanup Old Snapshots
   // ─────────────────────────────────────────────────────────────────────────────
   try {
     console.log('📊 Cleaning up old snapshots...');

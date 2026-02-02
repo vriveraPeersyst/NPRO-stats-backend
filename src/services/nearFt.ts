@@ -111,39 +111,41 @@ export async function getTrackedAccountBalances(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface ValidatorStats {
+  /** Actively staked NEAR earning rewards */
   stakedBalance: {
     raw: string;
     formatted: string;
     number: number;
   };
+  /** Unstaked NEAR (pending cooldown + ready to withdraw) - from pool's liquid balance */
   unstakedBalance: {
     raw: string;
     formatted: string;
     number: number;
   };
+  /** Total delegated NEAR (staked + unstaked) */
   totalBalance: {
     raw: string;
     formatted: string;
     number: number;
   };
+  /** Number of delegators in the pool */
+  delegatorCount: number;
   rpcUrlUsed: string;
 }
 
 /**
  * Get validator staking pool stats
- * Uses staking pool contract methods
+ * 
+ * - stakedBalance: from get_total_staked_balance() - actively earning rewards
+ * - unstakedBalance: from account.amount (pool's liquid NEAR) - includes unstaked tokens
+ * - totalBalance: staked + unstaked
  */
 export async function getValidatorStats(): Promise<ValidatorStats> {
   const rpcManager = getNearRpcManager();
 
-  // Staking pool methods vary by implementation
-  // Common methods for NEAR staking pools:
-  // - get_total_staked_balance
-  // - get_account_staked_balance
-  // - get_account_unstaked_balance
-
   try {
-    // Try to get total staked balance
+    // Get total staked balance (actively staking)
     const stakedResult = await viewFunction(
       CONSTANTS.VALIDATOR_POOL,
       'get_total_staked_balance',
@@ -151,13 +153,44 @@ export async function getValidatorStats(): Promise<ValidatorStats> {
     );
     const stakedRaw = stakedResult.replace(/"/g, '');
 
-    // For validator pools, we don't track unstaked balance
-    // (it requires individual account queries which we don't have)
-    const unstakedRaw = '0';
+    // Get number of delegators
+    const delegatorCountResult = await viewFunction(
+      CONSTANTS.VALIDATOR_POOL,
+      'get_number_of_accounts',
+      {}
+    );
+    const delegatorCount = parseInt(delegatorCountResult.replace(/"/g, ''), 10) || 0;
+
+    // Get account state - amount contains liquid NEAR (unstaked balances)
+    interface AccountView {
+      amount: string;
+      locked: string;
+      code_hash: string;
+      storage_usage: number;
+      storage_paid_at: number;
+      block_height: number;
+      block_hash: string;
+    }
+
+    const accountView = await rpcManager.makeRequest(async (provider) => {
+      const rawResult = await provider.query({
+        request_type: 'view_account',
+        finality: 'final',
+        account_id: CONSTANTS.VALIDATOR_POOL,
+      });
+      return rawResult as unknown as AccountView;
+    });
+
+    // unstaked = account.amount (pool's liquid balance containing unstaked tokens)
+    // This includes both tokens in cooldown and ready to withdraw
+    const stakedAmount = BigInt(stakedRaw);
+    const unstakedAmount = BigInt(accountView.amount);
+    const unstakedRaw = unstakedAmount.toString();
+    const totalAmount = stakedAmount + unstakedAmount;
+    const totalRaw = totalAmount.toString();
 
     const stakedFormatted = formatTokenAmount(stakedRaw);
     const unstakedFormatted = formatTokenAmount(unstakedRaw);
-    const totalRaw = (BigInt(stakedRaw) + BigInt(unstakedRaw)).toString();
 
     return {
       stakedBalance: {
@@ -175,6 +208,7 @@ export async function getValidatorStats(): Promise<ValidatorStats> {
         formatted: formatTokenAmount(totalRaw),
         number: parseFloat(formatTokenAmount(totalRaw)),
       },
+      delegatorCount,
       rpcUrlUsed: rpcManager.getCurrentUrl(),
     };
   } catch (error) {

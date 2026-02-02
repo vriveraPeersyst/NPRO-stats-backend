@@ -33,9 +33,12 @@ export interface PremiumStats {
   premiumUsersChange24h: number;
   ambassadorUsers: number;
   ambassadorUsersChange24h: number;
+  premiumSubscriptions24h: number;
+  ambassadorSubscriptions24h: number;
   upgrades24h: number;
   unsubscribes24h: number;
   paidUsers: number;
+  totalTransactions: number;
   locked: {
     premium: number;
     ambassador: number;
@@ -117,7 +120,7 @@ async function processPremiumEvent(txn: {
   // Convert nanosecond timestamp to Date
   const blockTimestamp = new Date(parseInt(txn.block_timestamp) / 1_000_000);
 
-  // Create the event record
+  // Create the event record (only save events, don't update user tiers yet)
   await prisma.premiumEvent.create({
     data: {
       eventIndex: txn.event_index,
@@ -129,47 +132,96 @@ async function processPremiumEvent(txn: {
     },
   });
 
-  // Update user tier if it's a known action
-  if (deltaType !== 'OTHER') {
-    const existingUser = await prisma.premiumUser.findUnique({
-      where: { accountId: txn.involved_account_id },
-    });
-
-    const currentTier = existingUser?.tier ?? UserTier.BASIC;
-    const newTier = computeNewTier(currentTier as UserTier, prismaDeltaType);
-
-    await prisma.premiumUser.upsert({
-      where: { accountId: txn.involved_account_id },
-      update: {
-        tier: newTier,
-        lastEventIndex: txn.event_index,
-        updatedAt: new Date(),
-      },
-      create: {
-        accountId: txn.involved_account_id,
-        tier: newTier,
-        lastEventIndex: txn.event_index,
-      },
-    });
-  }
-
   return true;
 }
 
 /**
+ * Rebuild user tiers by replaying all events in chronological order
+ * This ensures the correct final state regardless of fetch order
+ */
+async function rebuildUserTiersFromEvents(): Promise<{
+  usersProcessed: number;
+  tierCounts: { premium: number; ambassador: number; basic: number };
+}> {
+  console.log('🔄 Rebuilding user tiers from events in chronological order...');
+
+  // Delete all existing users
+  await prisma.premiumUser.deleteMany({});
+
+  // Get all events in chronological order (oldest first)
+  const allEvents = await prisma.premiumEvent.findMany({
+    orderBy: { blockTimestamp: 'asc' },
+  });
+
+  console.log(`  Processing ${allEvents.length} events chronologically`);
+
+  // Build user states by replaying events
+  const userStates = new Map<string, { tier: UserTier; lastEventIndex: string }>();
+
+  for (const event of allEvents) {
+    if (event.deltaType === DeltaType.OTHER) continue;
+
+    const currentTier = userStates.get(event.accountId)?.tier || UserTier.BASIC;
+    const newTier = computeNewTier(currentTier, event.deltaType as DeltaType);
+
+    userStates.set(event.accountId, {
+      tier: newTier,
+      lastEventIndex: event.eventIndex,
+    });
+  }
+
+  // Write final states to database (use upsert to handle any existing records)
+  for (const [accountId, state] of userStates.entries()) {
+    await prisma.premiumUser.upsert({
+      where: { accountId },
+      update: {
+        tier: state.tier,
+        lastEventIndex: state.lastEventIndex,
+      },
+      create: {
+        accountId,
+        tier: state.tier,
+        lastEventIndex: state.lastEventIndex,
+      },
+    });
+  }
+
+  // Count by tier
+  const tierCounts = {
+    premium: Array.from(userStates.values()).filter(s => s.tier === UserTier.PREMIUM).length,
+    ambassador: Array.from(userStates.values()).filter(s => s.tier === UserTier.AMBASSADOR).length,
+    basic: Array.from(userStates.values()).filter(s => s.tier === UserTier.BASIC).length,
+  };
+
+  console.log(`  ✅ Rebuilt ${userStates.size} users: ${tierCounts.premium} premium, ${tierCounts.ambassador} ambassador, ${tierCounts.basic} basic`);
+
+  return {
+    usersProcessed: userStates.size,
+    tierCounts,
+  };
+}
+
+/**
  * Run the premium indexer
- * Fetches transactions in pages and processes them
+ * Step 1: Fetches new events from API (newest to oldest), always starting from newest
+ * Step 2: Rebuilds user tiers from all events (oldest to newest)
+ * 
+ * The API returns transactions in descending order (newest first).
+ * We always start from the newest (no cursor) and paginate backwards until
+ * we hit transactions we've already indexed.
  */
 export async function runPremiumIndexer(): Promise<{
   pagesProcessed: number;
   eventsProcessed: number;
   newCursor: string | null;
+  usersRebuilt: number;
+  tierCounts: { premium: number; ambassador: number; basic: number };
 }> {
   const client = getNearBlocksClient();
   const maxPages = client.getMaxPagesPerRun();
   const pageLimit = client.getPageLimit();
 
-  // Get current state
+  // Get current state (for informational purposes)
   let state = await prisma.premiumState.findUnique({
     where: { id: 1 },
   });
@@ -181,17 +233,22 @@ export async function runPremiumIndexer(): Promise<{
     });
   }
 
-  let cursor = state.cursor;
+  // Always start from newest transactions (no cursor)
+  // We'll paginate backwards and stop when we hit already-indexed events
+  let paginationCursor: string | undefined = undefined;
   let pagesProcessed = 0;
   let eventsProcessed = 0;
+  let reachedIndexedEvents = false;
+  let newestEventIndex: string | null = null;
 
-  console.log(`📊 Starting premium indexer. Current cursor: ${cursor || 'null'}`);
+  console.log(`📊 Starting premium indexer. Starting from newest transactions.`);
+  console.log(`📊 Last known cursor: ${state.cursor || 'null (first run)'}`);
 
-  while (pagesProcessed < maxPages) {
+  while (pagesProcessed < maxPages && !reachedIndexedEvents) {
     try {
       const response = await client.getAccountFtTxns(
         PREMIUM_ACCOUNT,
-        cursor || undefined,
+        paginationCursor,
         pageLimit
       );
 
@@ -204,28 +261,51 @@ export async function runPremiumIndexer(): Promise<{
         `📊 Processing page ${pagesProcessed + 1} with ${response.txns.length} transactions`
       );
 
-      // Process transactions (oldest first for correct state tracking)
-      // Note: NearBlocks returns newest first, so we might need to reverse
-      // Actually, for incremental indexing we want newest first to catch up
+      // Process transactions in the page (they come newest first)
+      let newEventsInPage = 0;
+      let alreadyIndexedInPage = 0;
+      
       for (const txn of response.txns) {
+        // Track the newest event index we've seen (first txn on first page)
+        if (newestEventIndex === null) {
+          newestEventIndex = txn.event_index;
+        }
+
+        // Check if we've already processed this event_index
+        const existingEvent = await prisma.premiumEvent.findUnique({
+          where: { eventIndex: txn.event_index },
+        });
+
+        if (existingEvent) {
+          alreadyIndexedInPage++;
+          continue;
+        }
+
+        // Process new event
         const processed = await processPremiumEvent(txn);
         if (processed) {
           eventsProcessed++;
+          newEventsInPage++;
         }
       }
 
+      console.log(`📊 Page ${pagesProcessed + 1}: ${newEventsInPage} new, ${alreadyIndexedInPage} already indexed`);
+
+      // If we found any already-indexed events, we've caught up
+      // (we've reached the point where we left off last time)
+      if (alreadyIndexedInPage > 0) {
+        console.log(`📊 Reached already-indexed events - caught up with history`);
+        reachedIndexedEvents = true;
+      }
+
       pagesProcessed++;
-      cursor = response.cursor;
 
-      // Update state with new cursor
-      await prisma.premiumState.update({
-        where: { id: 1 },
-        data: { cursor },
-      });
+      // Use the response cursor to paginate to older transactions
+      paginationCursor = response.cursor || undefined;
 
-      // If no more pages
+      // Stop if no more pages
       if (!response.cursor) {
-        console.log('📊 Reached end of transactions');
+        console.log('📊 Reached end of transaction history');
         break;
       }
     } catch (error) {
@@ -234,14 +314,27 @@ export async function runPremiumIndexer(): Promise<{
     }
   }
 
+  // Update the cursor to the newest event we've seen (for informational purposes)
+  if (newestEventIndex) {
+    await prisma.premiumState.update({
+      where: { id: 1 },
+      data: { cursor: newestEventIndex },
+    });
+  }
+
   console.log(
-    `✅ Premium indexer completed. Pages: ${pagesProcessed}, Events: ${eventsProcessed}`
+    `✅ Premium indexer step 1 completed. Pages: ${pagesProcessed}, Events: ${eventsProcessed}${reachedIndexedEvents ? ' (caught up)' : ''}`
   );
+
+  // Step 2: Rebuild user tiers from all events in chronological order
+  const rebuildResult = await rebuildUserTiersFromEvents();
 
   return {
     pagesProcessed,
     eventsProcessed,
-    newCursor: cursor,
+    newCursor: newestEventIndex,
+    usersRebuilt: rebuildResult.usersProcessed,
+    tierCounts: rebuildResult.tierCounts,
   };
 }
 
@@ -259,8 +352,26 @@ export async function getPremiumStats(): Promise<PremiumStats> {
   const now = new Date();
   const past24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-  // Count events in last 24h
-  const [upgrades24h, unsubscribes24h] = await Promise.all([
+  // Count events in last 24h by type
+  const [
+    premiumSubs24h,
+    ambassadorSubs24h,
+    upgrades24h,
+    premiumDowngrades24h,
+    ambassadorDowngrades24h,
+  ] = await Promise.all([
+    prisma.premiumEvent.count({
+      where: {
+        deltaType: DeltaType.SUB_PREMIUM,
+        blockTimestamp: { gte: past24h },
+      },
+    }),
+    prisma.premiumEvent.count({
+      where: {
+        deltaType: DeltaType.SUB_AMBASSADOR,
+        blockTimestamp: { gte: past24h },
+      },
+    }),
     prisma.premiumEvent.count({
       where: {
         deltaType: DeltaType.UPGRADE,
@@ -269,21 +380,30 @@ export async function getPremiumStats(): Promise<PremiumStats> {
     }),
     prisma.premiumEvent.count({
       where: {
-        deltaType: { in: [DeltaType.DOWNGRADE_PREMIUM, DeltaType.DOWNGRADE_AMBASSADOR] },
+        deltaType: DeltaType.DOWNGRADE_PREMIUM,
+        blockTimestamp: { gte: past24h },
+      },
+    }),
+    prisma.premiumEvent.count({
+      where: {
+        deltaType: DeltaType.DOWNGRADE_AMBASSADOR,
         blockTimestamp: { gte: past24h },
       },
     }),
   ]);
 
-  // Get 24h change for premium and ambassador counts
-  const premiumDelta24h = await getDelta24h(
-    CONSTANTS.SNAPSHOT_KEYS.PREMIUM_USER_COUNT,
-    premiumCount
-  );
-  const ambassadorDelta24h = await getDelta24h(
-    CONSTANTS.SNAPSHOT_KEYS.AMBASSADOR_USER_COUNT,
-    ambassadorCount
-  );
+  // Calculate net changes
+  // Premium change = new premium subs + upgrades from ambassador - downgrades to basic
+  const premiumChange24h = premiumSubs24h + upgrades24h - premiumDowngrades24h;
+  
+  // Ambassador change = new ambassador subs - upgrades to premium - downgrades to basic
+  const ambassadorChange24h = ambassadorSubs24h - upgrades24h - ambassadorDowngrades24h;
+
+  // Total unsubscribes
+  const unsubscribes24h = premiumDowngrades24h + ambassadorDowngrades24h;
+
+  // Count total premium events
+  const totalTransactions = await prisma.premiumEvent.count();
 
   // Get state
   const state = await prisma.premiumState.findUnique({
@@ -292,12 +412,15 @@ export async function getPremiumStats(): Promise<PremiumStats> {
 
   return {
     premiumUsers: premiumCount,
-    premiumUsersChange24h: premiumDelta24h,
+    premiumUsersChange24h: premiumChange24h,
     ambassadorUsers: ambassadorCount,
-    ambassadorUsersChange24h: ambassadorDelta24h,
+    ambassadorUsersChange24h: ambassadorChange24h,
+    premiumSubscriptions24h: premiumSubs24h,
+    ambassadorSubscriptions24h: ambassadorSubs24h,
     upgrades24h,
     unsubscribes24h,
     paidUsers: premiumCount + ambassadorCount,
+    totalTransactions,
     locked: {
       premium: premiumCount * CONSTANTS.PREMIUM_TOKENS,
       ambassador: ambassadorCount * CONSTANTS.AMBASSADOR_TOKENS,

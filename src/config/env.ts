@@ -26,7 +26,7 @@ const envSchema = z.object({
   NEARBLOCKS_KEY_COOLDOWN_MS: z.string().default('180000').transform(Number),
   NEARBLOCKS_TIMEOUT_MS: z.string().default('10000').transform(Number),
   NEARBLOCKS_MAX_RETRIES: z.string().default('3').transform(Number),
-  NEARBLOCKS_MAX_PAGES_PER_RUN: z.string().default('20').transform(Number),
+  NEARBLOCKS_MAX_PAGES_PER_RUN: z.string().default('50').transform(Number),
 
   // DexScreener
   DEXSCREENER_BASE: z.string().url().default('https://api.dexscreener.com'),
@@ -106,6 +106,21 @@ export const CONSTANTS = {
   PREMIUM_TOKENS: 250,
   AMBASSADOR_TOKENS: 75,
 
+  // Accounts to exclude from rich list
+  EXCLUDED_FROM_RICHLIST: [
+    'npro-treasury.sputnik-dao.near',
+    'npro-team.sputnik-dao.near',
+    'npro-marketing.sputnik-dao.near',
+    'npro-staking.sputnik-dao.near',
+    'npro-liquidity.sputnik-dao.near',
+    'distribution.nearmobile.near',
+    'npro-validator.near',
+    'intents.near',
+    'premium.nearmobile.near',
+    'claim.nearmobile.near',
+    'v2.ref-finance.near',
+  ] as const,
+
   // Metric keys for storage
   METRIC_KEYS: {
     TOKEN_PRICES: 'token_prices',
@@ -114,6 +129,7 @@ export const CONSTANTS = {
     NEARBLOCKS_STATS: 'nearblocks_stats',
     LIQUIDITY_STATS: 'liquidity_stats',
     PREMIUM_STATS: 'premium_stats',
+    RICH_LIST: 'rich_list',
   },
 
   // Snapshot keys
