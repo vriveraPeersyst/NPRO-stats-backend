@@ -2,6 +2,7 @@ import { prisma } from '../db/prisma.js';
 import { CONSTANTS } from '../config/env.js';
 import { fetchNearPrice } from '../services/nearMobileApi.js';
 import { fetchLiquidityData } from '../services/dexscreener.js';
+import { fetchNproCirculatingSupply } from '../services/nproSupply.js';
 import { getValidatorStats, getTrackedAccountBalances, getFtBalance } from '../services/nearFt.js';
 import { writeSnapshot } from '../utils/snapshots.js';
 import { getNearRpcManager } from '../services/nearRpcManager.js';
@@ -85,8 +86,19 @@ export async function runFastSync(): Promise<FastSyncResult> {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // 2. Fetch NEAR Price from NEAR Mobile API
+  // 2. Fetch NEAR Price from NEAR Mobile API and NPRO Circulating Supply
   // ─────────────────────────────────────────────────────────────────────────────
+  let nproCirculatingSupply = 0;
+
+  try {
+    console.log('📊 Fetching NPRO circulating supply...');
+    nproCirculatingSupply = await fetchNproCirculatingSupply();
+  } catch (error) {
+    const message = `NPRO supply error: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(`❌ ${message}`);
+    errors.push(message);
+  }
+
   try {
     console.log('📊 Fetching NEAR price from NEAR Mobile API...');
     const nearPriceData = await fetchNearPrice();
@@ -101,15 +113,16 @@ export async function runFastSync(): Promise<FastSyncResult> {
     });
     
     let nproChange24h = 0;
-    let nproMarketCap = 0;
     let nproFdv = 0;
     
     if (liquidityMetric?.value && typeof liquidityMetric.value === 'object') {
       const liquidityValue = liquidityMetric.value as any;
       nproChange24h = liquidityValue.rhea?.priceChange24hPct || 0;
-      nproMarketCap = liquidityValue.rhea?.marketCap || 0;
       nproFdv = liquidityValue.rhea?.fdv || 0;
     }
+
+    // Calculate market cap from circulating supply and price
+    const nproMarketCap = nproCirculatingSupply * nproPriceUsd;
 
     // Calculate NPRO/NEAR 24h change
     const nproYesterday = nproPriceUsd / (1 + nproChange24h / 100);
@@ -127,7 +140,7 @@ export async function runFastSync(): Promise<FastSyncResult> {
         change30d: 0, // Not available from DexScreener
         marketCap: nproMarketCap,
         fdv: nproFdv,
-        circulatingSupply: nproMarketCap > 0 && nproPriceUsd > 0 ? nproMarketCap / nproPriceUsd : 0,
+        circulatingSupply: nproCirculatingSupply,
       },
       near: {
         usd: nearPriceUsd,
