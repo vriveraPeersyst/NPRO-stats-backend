@@ -18,7 +18,7 @@ import { prisma } from '../db/prisma.js';
 import { getNearBlocksClient } from '../services/nearblocksClient.js';
 import { CONSTANTS } from '../config/env.js';
 import { classifyPremiumDelta } from '../utils/format.js';
-import { writeSnapshot, getDelta24h } from '../utils/snapshots.js';
+import { writeSnapshot } from '../utils/snapshots.js';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Premium Indexer
