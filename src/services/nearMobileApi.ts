@@ -18,11 +18,12 @@ export interface NearPriceResult {
 }
 
 function parseNearMobilePrice(data: unknown): NearPriceResult {
-  if (!Array.isArray(data)) {
-    throw new Error('NEAR Mobile API returned invalid response format');
-  }
+  // Support both flat array and paginated { items: [...] } response
+  const items: NearMobilePriceData[] = Array.isArray(data)
+    ? data
+    : (data as any)?.items ?? [];
 
-  const nearData = (data as NearMobilePriceData[]).find((t) => t.id === 'near');
+  const nearData = items.find((t) => t.id === 'near');
 
   if (!nearData) {
     throw new Error('NEAR token data not found in NEAR Mobile API response');
@@ -31,13 +32,13 @@ function parseNearMobilePrice(data: unknown): NearPriceResult {
   return {
     usd: parseFloat(nearData.usdPrice),
     change24h: parseFloat(nearData.usd24hChange),
-  }
+  };
 }
 
 async function fetchNearPriceFromNearMobile(): Promise<NearPriceResult> {
-  const url = `${NEAR_MOBILE_API_BASE}/api/market`;
+  const url = `${NEAR_MOBILE_API_BASE}/api/market/list?pageSize=100`;
 
-  console.log('🪙 NEAR Mobile API request: /api/market');
+  console.log('🪙 NEAR Mobile API request: /api/market/list');
 
   const response = await fetch(url, {
     method: 'GET',
